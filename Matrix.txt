@@ -1,0 +1,528 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
+local Matrix = {}
+Matrix.__index = Matrix
+
+local floor, abs, sqrt, max, min = math.floor, math.abs, math.sqrt, math.max, math.min
+local random = math.random
+
+local function newRaw(rows, cols, data)
+	local m = setmetatable({}, Matrix)
+	m.rows = rows
+	m.cols = cols
+	m.data = data or {}
+	return m
+end
+
+function Matrix.new(rows, cols, filler)
+	rows = rows or 0; cols = cols or 0
+	local data = {}
+	for i = 1, rows do
+		local row = {}
+		for j = 1, cols do row[j] = filler or 0 end
+		data[i] = row
+	end
+	return newRaw(rows, cols, data)
+end
+
+function Matrix.zeros(rows, cols) return Matrix.new(rows, cols, 0) end
+function Matrix.ones(rows, cols) local M = Matrix.new(rows, cols, 1); return M end
+function Matrix.eye(n)
+	local I = Matrix.zeros(n, n)
+	for i = 1, n do I.data[i][i] = 1 end
+	return I
+end
+
+function Matrix.fromTable(tbl)
+	local rows = #tbl
+	assert(rows > 0, "empty table")
+	local cols = #tbl[1]
+	local data = {}
+	for i = 1, rows do
+		assert(#tbl[i] == cols, "ragged table")
+		local row = {}
+		for j = 1, cols do row[j] = tbl[i][j] end
+		data[i] = row
+	end
+	return newRaw(rows, cols, data)
+end
+
+function Matrix.fromFlat(rows, cols, flat)
+	assert(#flat >= rows * cols, "flat too short")
+	local data = {}
+	local idx = 1
+	for i = 1, rows do
+		local row = {}
+		for j = 1, cols do row[j] = flat[idx]; idx = idx + 1 end
+		data[i] = row
+	end
+	return newRaw(rows, cols, data)
+end
+
+function Matrix.random(rows, cols, lo, hi)
+	lo = lo or -1; hi = hi or 1
+	local data = {}
+	for i = 1, rows do
+		local row = {}
+		for j = 1, cols do row[j] = random() * (hi - lo) + lo end
+		data[i] = row
+	end
+	return newRaw(rows, cols, data)
+end
+
+function Matrix:clone()
+	local data = {}
+	for i = 1, self.rows do
+		local row = {}
+		for j = 1, self.cols do row[j] = self.data[i][j] end
+		data[i] = row
+	end
+	return newRaw(self.rows, self.cols, data)
+end
+
+function Matrix:toTable()
+	local out = {}
+	for i = 1, self.rows do
+		out[i] = {}
+		for j = 1, self.cols do out[i][j] = self.data[i][j] end
+	end
+	return out
+end
+
+function Matrix:shape() return self.rows, self.cols end
+
+local function checkDims(a, b)
+	assert(a.rows == b.rows and a.cols == b.cols, "dimension mismatch")
+end
+
+function Matrix:get(i, j) assert(i>=1 and i<=self.rows and j>=1 and j<=self.cols, "index out"); return self.data[i][j] end
+function Matrix:set(i, j, v) assert(i>=1 and i<=self.rows and j>=1 and j<=self.cols, "index out"); self.data[i][j] = v end
+
+function Matrix:add(other) checkDims(self, other); local R = Matrix.new(self.rows, self.cols)
+	for i=1,self.rows do local rR, rA, rB = R.data[i], self.data[i], other.data[i]; for j=1,self.cols do rR[j] = rA[j] + rB[j] end end; return R end
+function Matrix:sub(other) checkDims(self, other); local R = Matrix.new(self.rows, self.cols)
+	for i=1,self.rows do local rR, rA, rB = R.data[i], self.data[i], other.data[i]; for j=1,self.cols do rR[j] = rA[j] - rB[j] end end; return R end
+function Matrix:scale(s) local R = Matrix.new(self.rows, self.cols); for i=1,self.rows do local rR, rA = R.data[i], self.data[i]; for j=1,self.cols do rR[j] = rA[j]*s end end; return R end
+function Matrix:hadamard(other) checkDims(self, other); local R = Matrix.new(self.rows, self.cols)
+	for i=1,self.rows do local rR, rA, rB = R.data[i], self.data[i], other.data[i]; for j=1,self.cols do rR[j] = rA[j] * rB[j] end end; return R end
+
+function Matrix:dot(other)
+	assert(self.cols == other.rows, "dot dimension mismatch")
+	local R = Matrix.zeros(self.rows, other.cols)
+	local A = self.data; local B = other.data
+	for i=1,self.rows do
+		local rowR = R.data[i]; local rowA = A[i]
+		for k=1,self.cols do
+			local aik = rowA[k]; local rowB = B[k]
+			for j=1, other.cols do
+				rowR[j] = rowR[j] + aik * rowB[j]
+			end
+		end
+	end
+	return R
+end
+
+function Matrix.__mul(a, b)
+	if getmetatable(a) == Matrix and getmetatable(b) == Matrix then return a:dot(b) end
+	if getmetatable(a) == Matrix and type(b) == "number" then return a:scale(b) end
+	if type(a) == "number" and getmetatable(b) == Matrix then return b:scale(a) end
+	error("invalid operands for *")
+end
+function Matrix.__add(a,b) if getmetatable(a)==Matrix and getmetatable(b)==Matrix then return a:add(b) end; error("invalid +") end
+function Matrix.__sub(a,b) if getmetatable(a)==Matrix and getmetatable(b)==Matrix then return a:sub(b) end; error("invalid -") end
+
+function Matrix:transpose()
+	local R = Matrix.zeros(self.cols, self.rows)
+	for i=1,self.rows do local row = self.data[i]; for j=1,self.cols do R.data[j][i] = row[j] end end
+	return R
+end
+
+function Matrix:matVec(v)
+	assert(#v == self.cols, "vec length mismatch")
+	local out = {}
+	for i = 1, self.rows do
+		local s = 0
+		local row = self.data[i]
+		for j = 1, self.cols do s = s + row[j] * v[j] end
+		out[i] = s
+	end
+	return out
+end
+
+function Matrix:matTvec(v)
+	assert(#v == self.rows, "vec length mismatch")
+	local out = {}
+	for j = 1, self.cols do
+		local s = 0
+		for i = 1, self.rows do s = s + self.data[i][j] * v[i] end
+		out[j] = s
+	end
+	return out
+end
+
+local function vecNorm2(v)
+	local s = 0 for i=1,#v do s = s + v[i]*v[i] end; return sqrt(s) end
+
+function Matrix:qrHouseholder()
+	local m, n = self.rows, self.cols
+	local A = self:clone()
+	local Q = Matrix.eye(m)
+	for k = 1, min(m-1, n) do
+		local x = {}
+		for i = k, m do x[#x+1] = A.data[i][k] end
+		local normx = vecNorm2(x)
+		if normx ~= 0 then
+			local sign = (x[1] >= 0) and 1 or -1
+			local u1 = x[1] + sign * normx
+			local w = {u1}
+			for t = 2, #x do w[t] = x[t] end
+			local wn = vecNorm2(w)
+			for t = 1, #w do w[t] = w[t] / wn end
+			for i = k, m do
+				for j = k, n do
+					local dot = 0
+					for t = 1, #w do dot = dot + w[t] * A.data[k + t - 1][j] end
+					A.data[i][j] = A.data[i][j] - 2 * w[i - k + 1] * dot
+				end
+			end
+			for i = 1, m do
+				for j = k, m do
+					local dot = 0
+					for t = 1, #w do dot = dot + w[t] * Q.data[i][k + t - 1] end
+					Q.data[i][j] = Q.data[i][j] - 2 * dot * w[j - k + 1]
+				end
+			end
+		end
+	end
+	local R = Matrix.new(m, n)
+	for i = 1, m do for j = 1, n do R.data[i][j] = (i <= j) and A.data[i][j] or 0 end end
+	return Q, R
+end
+
+function Matrix:qrThin()
+	local m, n = self.rows, self.cols
+	local r = min(m, n)
+	local A = self:clone()
+	local Qacc = Matrix.eye(m)
+	for k = 1, r do
+		local x = {}
+		for i = k, m do x[#x+1] = A.data[i][k] end
+		local nx = vecNorm2(x)
+		if nx ~= 0 then
+			local sign = (x[1] >= 0) and 1 or -1
+			local u1 = x[1] + sign * nx
+			local w = {u1}
+			for t = 2, #x do w[t] = x[t] end
+			local wn = vecNorm2(w)
+			for t = 1, #w do w[t] = w[t] / wn end
+			for i = k, m do
+				for j = k, n do
+					local dot = 0
+					for t = 1, #w do dot = dot + w[t] * A.data[k + t - 1][j] end
+					A.data[i][j] = A.data[i][j] - 2 * w[i - k + 1] * dot
+				end
+			end
+			for i = 1, m do
+				for j = k, m do
+					local dot = 0
+					for t = 1, #w do dot = dot + w[t] * Qacc.data[i][k + t - 1] end
+					Qacc.data[i][j] = Qacc.data[i][j] - 2 * dot * w[j - k + 1]
+				end
+			end
+		end
+	end
+	local Qthin = Matrix.new(m, r)
+	for i = 1, m do for j = 1, r do Qthin.data[i][j] = Qacc.data[i][j] end end
+	local Rthin = Matrix.new(r, n)
+	for i = 1, r do for j = 1, n do Rthin.data[i][j] = Qacc.data[i] and A.data[i][j] or 0 end end
+	for i = 1, r do for j = 1, n do Rthin.data[i][j] = A.data[i][j] end end
+	return Qthin, Rthin
+end
+
+function Matrix:leastSquares(b)
+	local m, n = self.rows, self.cols
+	assert(#b == m or (getmetatable(b) == Matrix and b.rows == m and b.cols == 1), "b size mismatch")
+	local Q, R = self:qrHouseholder()
+	local bt = {}
+	for i = 1, m do
+		local s = 0
+		for j = 1, m do s = s + Q.data[j][i] * (getmetatable(b) == Matrix and b.data[j][1] or b[j]) end
+		bt[i] = s
+	end
+	local x = {}
+	for i = n, 1, -1 do
+		local sum = bt[i]
+		for j = i+1, n do sum = sum - R.data[i][j] * x[j] end
+		x[i] = sum / R.data[i][i]
+	end
+	return x
+end
+
+function Matrix:lup()
+	assert(self.rows == self.cols, "LUP requires square")
+	local n = self.rows
+	local LU = self:clone()
+	local P = {}
+	for i = 1, n do P[i] = i end
+	local toggle = 1
+	for k = 1, n do
+		local pivot = k
+		local maxv = abs(LU.data[k][k])
+		for i = k+1, n do
+			local v = abs(LU.data[i][k])
+			if v > maxv then maxv = v; pivot = i end
+		end
+		if maxv == 0 then error("singular") end
+		if pivot ~= k then
+			LU.data[k], LU.data[pivot] = LU.data[pivot], LU.data[k]
+			P[k], P[pivot] = P[pivot], P[k]
+			toggle = -toggle
+		end
+		local akk = LU.data[k][k]
+		for i = k+1, n do
+			LU.data[i][k] = LU.data[i][k] / akk
+			local lik = LU.data[i][k]
+			local rowi, rowk = LU.data[i], LU.data[k]
+			for j = k+1, n do
+				rowi[j] = rowi[j] - lik * rowk[j]
+			end
+		end
+	end
+	return LU, P, toggle
+end
+
+local function solveLUPRaw(LUraw, P, b)
+	local n = #LUraw
+	local y = {}
+	for i = 1, n do y[i] = b[P[i]] end
+	for i = 1, n do
+		local row = LUraw[i]
+		local sum = y[i]
+		for j = 1, i-1 do sum = sum - row[j] * y[j] end
+		y[i] = sum
+	end
+	local x = {}
+	for i = n, 1, -1 do
+		local row = LUraw[i]
+		local sum = y[i]
+		for j = i+1, n do sum = sum - row[j] * x[j] end
+		x[i] = sum / row[i]
+	end
+	return x
+end
+
+function Matrix:solve(b)
+	assert(self.rows == self.cols, "solve requires square")
+	local LU, P = (function() local lu, p = self:lup(); return lu, p end)()
+	local LUraw = {}
+	for i = 1, self.rows do LUraw[i] = LU.data[i] end
+	local bv = {}
+	if getmetatable(b) == Matrix then
+		assert(b.cols == 1 and b.rows == self.rows, "b must be n x 1")
+		for i = 1, self.rows do bv[i] = b.data[i][1] end
+	else
+		assert(#b == self.rows, "b size")
+		for i = 1, self.rows do bv[i] = b[i] end
+	end
+	local x = solveLUPRaw(LUraw, P, bv)
+	return x
+end
+
+function Matrix:determinant()
+	assert(self.rows == self.cols, "det requires square")
+	local LU, P, toggle = self:lup()
+	local det = toggle
+	for i = 1, self.rows do det = det * LU.data[i][i] end
+	return det
+end
+
+function Matrix:inverse()
+	assert(self.rows == self.cols, "inverse requires square")
+	local n = self.rows
+	local LU, P = (function() local lu, p = self:lup(); return lu, p end)()
+	local LUraw = {}
+	for i = 1, n do LUraw[i] = LU.data[i] end
+	local inv = Matrix.zeros(n, n)
+	for col = 1, n do
+		local e = {}
+		for i = 1, n do e[i] = 0 end
+		e[col] = 1
+		local x = solveLUPRaw(LUraw, P, e)
+		for i = 1, n do inv.data[i][col] = x[i] end
+	end
+	return inv
+end
+
+local function matMulVec(A, v) return A:matVec(v) end
+local function matTmulVec(A, v) return A:matTvec(v) end
+
+local function normalizeVec(v)
+	local n = vecNorm2(v)
+	if n == 0 then return v, 0 end
+	for i = 1, #v do v[i] = v[i] / n end
+	return v, n
+end
+
+local function vecCopy(v) local c = {}; for i=1,#v do c[i]=v[i] end; return c end
+
+local function vecDot(a,b) local s=0; for i=1,#a do s=s+a[i]*b[i] end; return s end
+
+local function vecSubScaled(a, b, scale)
+	for i=1,#a do a[i] = a[i] - scale * (b[i] or 0) end
+end
+
+function Matrix:svdPower(opt)
+	opt = opt or {}
+	local m, n = self.rows, self.cols
+	local k = opt.k or math.min(m, n)
+	local tol = opt.tol or 1e-6
+	local maxIter = opt.maxIter or 200
+	local A = self
+	local U = {}
+	local V = {}
+	local S = {}
+	local At = self:transpose()
+
+	local function applyA(v) return matMulVec(A, v) end
+	local function applyAT(v) return matTmulVec(A, v) end
+
+	for r = 1, k do
+		local v = {}
+		for i = 1, n do v[i] = random() end
+		if #V > 0 then
+			for _,pv in ipairs(V) do
+				local proj = vecDot(v, pv)
+				vecSubScaled(v, pv, proj)
+			end
+		end
+		local sigma = 0
+		for iter = 1, maxIter do
+			local u = applyA(v)
+			if #U > 0 then
+				for _,pu in ipairs(U) do
+					local proju = vecDot(u, pu)
+					vecSubScaled(u, pu, proju)
+				end
+			end
+			local local_nu
+			u, local_nu = normalizeVec(u)
+			if local_nu == 0 then break end
+			v = applyAT(u)
+			if #V > 0 then
+				for _,pv in ipairs(V) do
+					local projv = vecDot(v, pv)
+					vecSubScaled(v, pv, projv)
+				end
+			end
+			local local_nv
+			v, local_nv = normalizeVec(v)
+			if local_nv == 0 then break end
+			local Av = applyA(v)
+			local snew = vecDot(u, Av)
+			if sigma ~= 0 and abs(snew - sigma) <= tol * sigma then
+				sigma = snew
+				break
+			end
+			sigma = snew
+			if iter == maxIter then break end
+		end
+
+		if sigma <= 0 then break end
+
+		local uvec = applyA(v)
+		normalizeVec(uvec)
+		U[#U+1] = uvec
+		V[#V+1] = vecCopy(v)
+		S[#S+1] = sigma
+
+		for i = 1, m do
+			local ui = uvec[i] or 0
+			local row = A.data[i]
+			for j = 1, n do
+				row[j] = row[j] - sigma * ui * (v[j] or 0)
+			end
+		end
+	end
+
+	local ur = #U; local vr = #V
+	local Um = Matrix.zeros(m, ur)
+	local Vm = Matrix.zeros(n, vr)
+	for c = 1, ur do
+		for i = 1, m do Um.data[i][c] = U[c][i] or 0 end
+	end
+	for c = 1, vr do
+		for i = 1, n do Vm.data[i][c] = V[c][i] or 0 end
+	end
+	local Sdiag = Matrix.zeros(ur, vr)
+	for i = 1, #S do Sdiag.data[i][i] = S[i] end
+
+	return Um, Sdiag, Vm
+end
+
+function Matrix:pinv(opts)
+	opts = opts or {}
+	local m, n = self.rows, self.cols
+	if m >= n then
+		local At = self:transpose()
+		local AtA = At:dot(self)
+		local ok, det = pcall(function() return AtA:determinant() end)
+		if ok and det and abs(det) > 1e-12 then
+			local inv = AtA:inverse()
+			local pinv = inv:dot(At)
+			return pinv
+		end
+	end
+	local k = opts.k or math.min(m, n)
+	local Um, Sdiag, Vm = self:clone():svdPower({k=k, tol = opts.tol or 1e-6, maxIter = opts.maxIter or 300})
+	local r = math.min(Sdiag.rows, Sdiag.cols)
+	local SigmaPlus = Matrix.zeros(Sdiag.cols, Sdiag.rows)
+	for i = 1, r do
+		local s = Sdiag.data[i][i]
+		if s > (opts.tol or 1e-12) then SigmaPlus.data[i][i] = 1 / s end
+	end
+	local pinv = Vm:dot(SigmaPlus):dot(Um:transpose())
+	return pinv
+end
+
+function Matrix:condition(opts)
+	opts = opts or {}
+	local k = math.min(self.rows, self.cols)
+	local Um, Sdiag, Vm = self:clone():svdPower({k = k, tol = opts.tol or 1e-6, maxIter = opts.maxIter or 200})
+	local svals = {}
+	for i = 1, math.min(Sdiag.rows, Sdiag.cols) do svals[#svals+1] = Sdiag.data[i][i] end
+	if #svals == 0 then return math.huge end
+	table.sort(svals, function(a,b) return a > b end)
+	local largest = svals[1] or 0
+	local smallest = svals[#svals] or 0
+	if smallest == 0 then return math.huge end
+	return largest / smallest
+end
+
+function Matrix:solveLeastSquares(b, opts)
+	opts = opts or {}
+	if self.rows == self.cols then
+		local ok, res = pcall(function() return self:solve(b) end)
+		if ok then return res end
+	end
+	return self:leastSquares(b)
+end
+
+setmetatable(Matrix, { __call = function(_, ...) return Matrix.new(...) end })
+
+function Matrix:__tostring()
+	local parts = {}
+	for i = 1, self.rows do
+		local row = self.data[i]
+		local s = "{"
+		for j = 1, self.cols do
+			s = s .. string.format("%.6g", row[j])
+			if j < self.cols then s = s .. ", " end
+		end
+		s = s .. "}"
+		parts[#parts+1] = s
+	end
+	return "Matrix(" .. self.rows .. "x" .. self.cols .. "):\n" .. table.concat(parts, "\n")
+end
+
+return Matrix

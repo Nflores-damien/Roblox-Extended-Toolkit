@@ -1,0 +1,204 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
+local Integration = {}
+local _buffers = {}  -- cache: _buffers[n] = {k1,k2,k3,k4,temp}
+
+local function newBuffer(n)
+	local buf = {}
+	buf.k1 = {}
+	buf.k2 = {}
+	buf.k3 = {}
+	buf.k4 = {}
+	buf.temp = {}
+	buf.tmp2 = {} -- extra scratch
+	for i = 1, n do
+		buf.k1[i] = 0
+		buf.k2[i] = 0
+		buf.k3[i] = 0
+		buf.k4[i] = 0
+		buf.temp[i] = 0
+		buf.tmp2[i] = 0
+	end
+	return buf
+end
+
+local function ensureBuffers(n)
+	if not _buffers[n] then
+		_buffers[n] = newBuffer(n)
+	end
+	return _buffers[n]
+end
+
+local function assertNumber(x, name)
+	if type(x) ~= "number" or x ~= x then -- check NaN
+		error(("%s must be a valid number (got %s)"):format(name, tostring(x)), 3)
+	end
+end
+
+local function checkStateTable(state, expectedLen)
+	if type(state) ~= "table" then
+		error("state must be a numeric array (table) - e.g. {x,y,vx,vy}", 3)
+	end
+	local n = #state
+	if n == 0 then error("state is empty (#state == 0)", 3) end
+	if expectedLen and n ~= expectedLen then
+		error(("state length mismatch: expected %d, got %d"):format(expectedLen, n), 3)
+	end
+	for i = 1, (n < 4 and n or 4) do
+		if type(state[i]) ~= "number" then
+			error(("state[%d] is not a number (got %s)"):format(i, type(state[i])), 3)
+		end
+	end
+	return n
+end
+
+local function copyInto(dst, src, n)
+	for i = 1, n do dst[i] = src[i] end
+end
+
+local function callAndCopy(f, argState, dst, n)
+	local ret = f(argState)
+	if type(ret) ~= "table" then
+		error("derivative function must return a numeric array (table) of length " .. n, 3)
+	end
+	if #ret ~= n then
+		error(("derivative returned wrong length: expected %d, got %d"):format(n, #ret), 3)
+	end
+	for i = 1, n do
+		local v = ret[i]
+		if type(v) ~= "number" then
+			error(("derivative[%d] is not a number (got %s)"):format(i, type(v)), 3)
+		end
+		dst[i] = v
+	end
+end
+
+function Integration.RK4(f, state, dt, opts)
+	opts = opts or {}
+	assert(type(f) == "function", "first arg must be function f(state) -> derivative")
+	local n = checkStateTable(state)
+	assertNumber(dt, "dt")
+	local buf = ensureBuffers(n)
+	local k1,k2,k3,k4,temp = buf.k1, buf.k2, buf.k3, buf.k4, buf.temp
+	callAndCopy(f, state, k1, n)
+	for i = 1, n do temp[i] = state[i] + 0.5 * dt * k1[i] end
+	callAndCopy(f, temp, k2, n)
+	for i = 1, n do temp[i] = state[i] + 0.5 * dt * k2[i] end
+	callAndCopy(f, temp, k3, n)
+	for i = 1, n do temp[i] = state[i] + dt * k3[i] end
+	callAndCopy(f, temp, k4, n)
+	local out = opts.out or {}
+	for i = 1, n do
+		out[i] = state[i] + (dt/6) * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i])
+	end
+	return out
+end
+
+function Integration.RK2(f, state, dt, opts)
+	opts = opts or {}
+	assert(type(f) == "function", "first arg must be function f(state) -> derivative")
+	local n = checkStateTable(state)
+	assertNumber(dt, "dt")
+	local buf = ensureBuffers(n)
+	local k1,k2,temp = buf.k1, buf.k2, buf.temp
+	callAndCopy(f, state, k1, n)
+	for i = 1, n do temp[i] = state[i] + 0.5 * dt * k1[i] end
+	callAndCopy(f, temp, k2, n)
+	local out = opts.out or {}
+	for i = 1, n do out[i] = state[i] + dt * k2[i] end
+	return out
+end
+
+function Integration.Euler(f, state, dt, opts)
+	opts = opts or {}
+	assert(type(f) == "function", "first arg must be function f(state) -> derivative")
+	local n = checkStateTable(state)
+	assertNumber(dt, "dt")
+	local buf = ensureBuffers(n)
+	local deriv = buf.k1
+	callAndCopy(f, state, deriv, n)
+	local out = opts.out or {}
+	for i = 1, n do out[i] = state[i] + dt * deriv[i] end
+	return out
+end
+
+function Integration.SymplecticEuler(f, state, dt, opts)
+	opts = opts or {}
+	assert(type(f) == "function", "first arg must be accFunc(pos, vel) -> acceleration array")
+	if type(state) == "table" and type(dt) == "number" and opts.separate then
+		-- user forced separate mode but passed combined args, fall through to split logic
+	end
+
+	local nTotal = checkStateTable(state)
+	assertNumber(dt, "dt")
+	local nPos = opts.split
+	if nPos == nil then
+		if nTotal % 2 == 1 then
+			error("combined state length must be even or provide opts.split (npos)", 3)
+		end
+		nPos = nTotal / 2
+	else
+		if nPos < 1 or nPos*2 ~= nTotal then
+			error("opts.split must satisfy npos*2 == #state (combined pos+vel layout)", 3)
+		end
+	end
+	local n = nPos
+	local buf = ensureBuffers(n)
+	local pos = buf.temp
+	local vel = buf.tmp2
+	for i = 1, n do
+		pos[i] = state[i]
+		vel[i] = state[n + i]
+	end
+	local acc = f(pos, vel)
+	if type(acc) ~= "table" then
+		error("SymplecticEuler: accFunc should be function(pos, vel) -> acceleration-table", 3)
+	end
+	if #acc ~= n then error(("acc length mismatch: expected %d got %d"):format(n, #acc), 3) end
+	local out = opts.out or {}
+	for i = 1, n do
+		local nv = vel[i] + acc[i] * dt
+		out[i] = pos[i] + nv * dt         -- pos
+		out[n + i] = nv                   -- vel
+	end
+	return out
+end
+
+function Integration.SymplecticEulerSeparate(accFunc, pos, vel, dt, opts)
+	opts = opts or {}
+	assert(type(accFunc) == "function", "first arg must be accFunc(pos, vel) -> acc")
+	local n = checkStateTable(pos)
+	checkStateTable(vel, n)
+	assertNumber(dt, "dt")
+	local buf = ensureBuffers(n)
+	local acc = accFunc(pos, vel)
+	if type(acc) ~= "table" or #acc ~= n then
+		error(("accFunc must return acceleration table of length %d"):format(n), 3)
+	end
+	local nextPos = opts.outPos or {}
+	local nextVel = opts.outVel or {}
+	for i = 1, n do
+		local nv = vel[i] + acc[i] * dt
+		nextPos[i] = pos[i] + nv * dt
+		nextVel[i] = nv
+	end
+	if opts.outCombined then
+		local combined = opts.outCombined
+		for i = 1, n do combined[i] = nextPos[i] end
+		for i = 1, n do combined[n + i] = nextVel[i] end
+		return combined
+	end
+	return nextPos, nextVel
+end
+
+function Integration.combinePosVel(pos, vel, out)
+	local n = checkStateTable(pos)
+	checkStateTable(vel, n)
+	local combined = out or {}
+	for i = 1, n do combined[i] = pos[i] end
+	for i = 1, n do combined[n + i] = vel[i] end
+	return combined
+end
+
+return Integration

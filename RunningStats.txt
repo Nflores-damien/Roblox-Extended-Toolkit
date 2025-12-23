@@ -1,0 +1,146 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
+local RunningStats = {}
+RunningStats.__index = RunningStats
+
+function RunningStats.new(maxHistory)
+	local self = setmetatable({}, RunningStats)
+	self.History = {}
+	self.MaxHistory = maxHistory or math.huge
+	return self
+end
+
+function RunningStats:Add(value)
+	table.insert(self.History, value)
+	if #self.History > self.MaxHistory then
+		table.remove(self.History, 1)
+	end
+end
+
+function RunningStats:Clear()
+	self.History = {}
+end
+
+local function cw(a, b, fn)
+	if typeof(a) == "Vector3" then
+		return Vector3.new(fn(a.X,b.X), fn(a.Y,b.Y), fn(a.Z,b.Z))
+	else
+		return fn(a,b)
+	end
+end
+
+function RunningStats:Mean()
+	local n = #self.History
+	if n == 0 then return nil end
+	local sum = self.History[1]
+	for i = 2, n do sum = cw(sum, self.History[i], function(x,y) return x+y end) end
+	return cw(sum, n, function(x,y) return x/y end)
+end
+
+function RunningStats:Variance()
+	local n = #self.History
+	if n < 2 then return nil end
+	local mean = self:Mean()
+	local sum = typeof(mean) == "Vector3" and Vector3.new(0,0,0) or 0
+	for i = 1, n do
+		local diff = cw(self.History[i], mean, function(v,m) return v-m end)
+		sum = cw(sum, cw(diff,diff,function(a,b) return a*b end), function(a,b) return a+b end)
+	end
+	return cw(sum, n-1, function(a,b) return a/b end)
+end
+
+function RunningStats:StdDev()
+	local var = self:Variance()
+	if not var then return nil end
+	if typeof(var) == "Vector3" then
+		return Vector3.new(math.sqrt(var.X), math.sqrt(var.Y), math.sqrt(var.Z))
+	else
+		return math.sqrt(var)
+	end
+end
+
+function RunningStats:WeightedMean(weights)
+	local n = #self.History
+	if n == 0 then return nil end
+	assert(#weights == n, "Weights must match history length")
+	local sum = typeof(self.History[1]) == "Vector3" and Vector3.new(0,0,0) or 0
+	local wSum = 0
+	for i = 1, n do
+		sum = cw(sum, cw(self.History[i], weights[i], function(v,w) return v*w end), function(a,b) return a+b end)
+		wSum = wSum + weights[i]
+	end
+	return cw(sum, wSum, function(a,b) return a/b end)
+end
+
+function RunningStats:Trend()
+	local n = #self.History
+	if n < 2 then return nil end
+	local first = self.History[1]
+	local last = self.History[n]
+	return cw(last, first, function(l,f) return (l-f)/(n-1) end)
+end
+
+function RunningStats:EMA(alpha)
+	alpha = alpha or 0.1
+	local n = #self.History
+	if n == 0 then return nil end
+	local ema = self.History[1]
+	for i = 2, n do
+		ema = cw(ema, self.History[i], function(p,c) return p*(1-alpha) + c*alpha end)
+	end
+	return ema
+end
+
+function RunningStats:Min()
+	local n = #self.History
+	if n == 0 then return nil end
+	local minVal = self.History[1]
+	for i = 2, n do
+		if typeof(minVal) == "Vector3" then
+			minVal = Vector3.new(
+				math.min(minVal.X, self.History[i].X),
+				math.min(minVal.Y, self.History[i].Y),
+				math.min(minVal.Z, self.History[i].Z)
+			)
+		else
+			minVal = math.min(minVal, self.History[i])
+		end
+	end
+	return minVal
+end
+
+function RunningStats:Max()
+	local n = #self.History
+	if n == 0 then return nil end
+	local maxVal = self.History[1]
+	for i = 2, n do
+		if typeof(maxVal) == "Vector3" then
+			maxVal = Vector3.new(
+				math.max(maxVal.X, self.History[i].X),
+				math.max(maxVal.Y, self.History[i].Y),
+				math.max(maxVal.Z, self.History[i].Z)
+			)
+		else
+			maxVal = math.max(maxVal, self.History[i])
+		end
+	end
+	return maxVal
+end
+
+function RunningStats:Covariance(other)
+	local n = #self.History
+	if n < 2 then return nil end
+	assert(#other.History == n, "Histories must match length")
+	local mean1 = self:Mean()
+	local mean2 = other:Mean()
+	local sum = typeof(mean1) == "Vector3" and Vector3.new(0,0,0) or 0
+	for i = 1, n do
+		local diff1 = cw(self.History[i], mean1, function(a,b) return a-b end)
+		local diff2 = cw(other.History[i], mean2, function(a,b) return a-b end)
+		sum = cw(sum, cw(diff1,diff2,function(a,b) return a*b end), function(a,b) return a+b end)
+	end
+	return cw(sum, n-1, function(a,b) return a/b end)
+end
+
+return RunningStats

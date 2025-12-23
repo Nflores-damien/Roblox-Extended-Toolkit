@@ -1,0 +1,39 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
+local Combinatorics = {}
+
+function Combinatorics.factorial(n)
+	assert(n >= 0 and n == math.floor(n), "factorial: n must be a non-negative integer")
+	local f = 1
+	for i = 2, n do f = f * i end
+	return f
+end
+
+function Combinatorics.permutations(n, k)
+	assert(n >= 0 and k >= 0 and k <= n, "invalid P(n,k)")
+	local p = 1
+	for i = n-k+1, n do p = p * i end
+	return p
+end
+
+function Combinatorics.combinations(n, k)
+	assert(n >= 0 and k >= 0 and k <= n, "invalid C(n,k)")
+	return Combinatorics.permutations(n, k) / Combinatorics.factorial(k)
+end
+
+function Combinatorics.allCombinations(t)
+	local result = {{}}
+	for _, v in ipairs(t) do
+		local newComb = {}
+		for _, subset in ipairs(result) do
+			local s = {table.unpack(subset)}
+			table.insert(s, v)
+			table.insert(newComb, s)
+		end
+		for _, s in ipairs(newComb) do table.insert(result, s) end
+	end
+	return result
+end
+
+return Combinatorics

@@ -1,0 +1,105 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
+local Curve = {}
+Curve.__index = Curve
+
+local sqrt, pow, min, max, abs, floor = math.sqrt, math.pow, math.min, math.max, math.abs, math.floor
+
+local function isVector3(v) return typeof and typeof(v) == "Vector3" end
+
+function Curve.catmullRom(points, t, alpha)
+	alpha = alpha or 0.5 -- 0.5 = centripetal, 0 = uniform
+	local n = #points
+	if n < 4 then error("catmullRom: need at least 4 points") end
+
+	local function tj(ti, pi, pj)
+		if isVector3(pi) then
+			return ti + pow((pj - pi).Magnitude, alpha)
+		else
+			return ti + pow(abs(pj - pi), alpha)
+		end
+	end
+
+	t = t * (n - 3)
+	local segment = min(floor(t), n - 4)
+	local u = t - segment
+
+	local p0, p1, p2, p3 = points[segment+1], points[segment+2], points[segment+3], points[segment+4]
+	local t0, t1, t2, t3 = 0, tj(0, p0, p1), 0, 0
+	t2 = tj(t1, p1, p2)
+	t3 = tj(t2, p2, p3)
+
+	local function interpolate(p0, p1, t0, t1, t)
+		if isVector3(p0) then
+			return ((p0 * (t1 - t)) + (p1 * (t - t0))) / (t1 - t0)
+		else
+			return ((p0 * (t1 - t)) + (p1 * (t - t0))) / (t1 - t0)
+		end
+	end
+
+	local A1 = interpolate(p0, p1, t0, t1, t1 + u*(t2-t1))
+	local A2 = interpolate(p1, p2, t1, t2, t1 + u*(t2-t1))
+	local A3 = interpolate(p2, p3, t2, t3, t2 + u*(t3-t2))
+	local B1 = interpolate(A1, A2, t0, t2, t1 + u*(t2-t1))
+	local B2 = interpolate(A2, A3, t1, t3, t1 + u*(t2-t1))
+	local C  = interpolate(B1, B2, t1, t2, t1 + u*(t2-t1))
+	return C
+end
+
+function Curve.hermite(p0, p1, t0, t1, t)
+	if isVector3(p0) then
+		local h00 = 2*t^3 - 3*t^2 + 1
+		local h10 = t^3 - 2*t^2 + t
+		local h01 = -2*t^3 + 3*t^2
+		local h11 = t^3 - t^2
+		return p0*h00 + t0*h10 + p1*h01 + t1*h11
+	else
+		local h00 = 2*t^3 - 3*t^2 + 1
+		local h10 = t^3 - 2*t^2 + t
+		local h01 = -2*t^3 + 3*t^2
+		local h11 = t^3 - t^2
+		return p0*h00 + t0*h10 + p1*h01 + t1*h11
+	end
+end
+
+function Curve.bezier(points, t)
+	local pts = {}
+	for i, p in ipairs(points) do pts[i] = p end
+	local n = #pts
+	while n > 1 do
+		for i = 1, n-1 do
+			if isVector3(pts[i]) then
+				pts[i] = pts[i]*(1-t) + pts[i+1]*t
+			else
+				pts[i] = pts[i]*(1-t) + pts[i+1]*t
+			end
+		end
+		n = n - 1
+	end
+	return pts[1]
+end
+
+function Curve.velocity(points, t, dt, method)
+	dt = dt or 0.001
+	method = method or "bezier"
+	local p1 = Curve[method](points, min(1, t+dt))
+	local p0 = Curve[method](points, max(0, t-dt))
+	if isVector3(p0) then
+		return (p1 - p0) / (2*dt)
+	else
+		return (p1 - p0) / (2*dt)
+	end
+end
+
+function Curve.sample(points, count, method)
+	local samples = {}
+	count = max(2, count or 10)
+	method = method or "catmullRom"
+	for i = 0, count-1 do
+		samples[i+1] = Curve[method](points, i/(count-1))
+	end
+	return samples
+end
+
+return Curve

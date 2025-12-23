@@ -1,0 +1,43 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
+local Misc = {}
+
+function Misc.computeAcceleration(velCurrent, velPrevious, dt)
+	local n = #velCurrent
+	local acc = {}
+	for i = 1, n do
+		acc[i] = (velCurrent[i] - velPrevious[i]) / dt
+	end
+	return acc
+end
+
+function Misc.clampVelocity(vel, maxSpeed)
+	local n = #vel
+	local speedSq = 0
+	for i = 1, n do speedSq = speedSq + vel[i]^2 end
+	local speed = math.sqrt(speedSq)
+	if speed > maxSpeed then
+		local factor = maxSpeed / speed
+		for i = 1, n do vel[i] = vel[i] * factor end
+	end
+	return vel
+end
+
+function Misc.deltaPosition(vel, dt)
+	local n = #vel
+	local dp = {}
+	for i = 1, n do dp[i] = vel[i] * dt end
+	return dp
+end
+
+function Misc.computeAccelFromHistory(history, dt)
+	local n = #history[1]
+	local acc = {}
+	for i = 1, n do
+		acc[i] = (history[#history][i] - history[#history-1][i]) / dt
+	end
+	return acc
+end
+
+return Misc

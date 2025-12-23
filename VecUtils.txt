@@ -1,0 +1,338 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
+-- I need to start putting comments in my code
+
+local VecUtils = {}
+VecUtils.__index = VecUtils
+
+local sqrt, abs, min, max, acos, cos, sin = math.sqrt, math.abs, math.min, math.max, math.acos, math.cos, math.sin
+local floor = math.floor
+local EPS = 1e-8
+
+local function isVector3(v) return typeof and typeof(v) == "Vector3" end
+local function isVector2(v) return typeof and typeof(v) == "Vector2" end
+
+local function v3(x,y,z) return Vector3.new(x or 0, y or 0, z or 0) end
+local function v2(x,y) return Vector2.new(x or 0, y or 0) end
+
+function VecUtils.len(v)
+	if isVector3(v) then return v.Magnitude end
+	if isVector2(v) then return v.Magnitude end
+	error("len: not a Vector2/Vector3")
+end
+
+function VecUtils.lenSq(v)
+	if isVector3(v) then
+		local x,y,z = v.X, v.Y, v.Z; return x*x + y*y + z*z
+	end
+	if isVector2(v) then local x,y=v.X,v.Y; return x*x + y*y end
+	error("lenSq: not a Vector2/Vector3")
+end
+
+function VecUtils.normalize(v, fallback)
+	if isVector3(v) then
+		local m = v.Magnitude
+		if m <= EPS then return fallback or Vector3.new(0,0,0) end
+		return v / m
+	end
+	if isVector2(v) then
+		local m = v.Magnitude
+		if m <= EPS then return fallback or Vector2.new(0,0) end
+		return v / m
+	end
+	error("normalize: not a Vector2/Vector3")
+end
+
+function VecUtils.safeNormalize(v, eps, fallback)
+	eps = eps or EPS
+	if isVector3(v) then
+		local m = v.Magnitude
+		if m <= eps then return fallback or Vector3.new(0,0,0) end
+		return v / m
+	end
+	if isVector2(v) then
+		local m = v.Magnitude
+		if m <= eps then return fallback or Vector2.new(0,0) end
+		return v / m
+	end
+	error("safeNormalize: not a Vector2/Vector3")
+end
+
+function VecUtils.dot(a, b)
+	if isVector3(a) and isVector3(b) then return a:Dot(b) end
+	if isVector2(a) and isVector2(b) then return a.X*b.X + a.Y*b.Y end
+	error("dot: mismatched types")
+end
+
+function VecUtils.cross(a, b)
+	if isVector3(a) and isVector3(b) then return a:Cross(b) end
+	error("cross: only Vector3 supported")
+end
+
+function VecUtils.project(a, b)
+	if isVector3(a) and isVector3(b) then
+		local denom = b:Dot(b)
+		if denom <= EPS then return Vector3.new(0,0,0) end
+		return b * (a:Dot(b) / denom)
+	end
+	if isVector2(a) and isVector2(b) then
+		local denom = b.X*b.X + b.Y*b.Y
+		if denom <= EPS then return Vector2.new(0,0) end
+		local s = (a.X*b.X + a.Y*b.Y) / denom
+		return Vector2.new(b.X * s, b.Y * s)
+	end
+	error("project: mismatched types")
+end
+
+function VecUtils.reflect(v, n)
+	if isVector3(v) and isVector3(n) then
+		return v - 2 * v:Dot(n) * n
+	end
+	if isVector2(v) and isVector2(n) then
+		local d = v.X * n.X + v.Y * n.Y
+		return Vector2.new(v.X - 2*d*n.X, v.Y - 2*d*n.Y)
+	end
+	error("reflect: mismatched types")
+end
+
+function VecUtils.angleBetween(a, b)
+	if (isVector3(a) and isVector3(b)) or (isVector2(a) and isVector2(b)) then
+		local da = VecUtils.dot(a,b)
+		local na = VecUtils.len(a); local nb = VecUtils.len(b)
+		if na <= EPS or nb <= EPS then return 0 end
+		local v = da / (na * nb)
+		if v > 1 then v = 1 elseif v < -1 then v = -1 end
+		return acos(v)
+	end
+	error("angleBetween: mismatched types")
+end
+
+function VecUtils.rotateAroundAxis(v, k, angle)
+	if not (isVector3(v) and isVector3(k)) then error("rotateAroundAxis: requires Vector3") end
+	local klen = k.Magnitude
+	if klen <= EPS then return v end
+	local u = k / klen
+	local c = cos(angle); local s = sin(angle)
+	return v * c + u:Cross(v) * s + u * (u:Dot(v) * (1 - c))
+end
+
+function VecUtils.lerp(a, b, t)
+	if isVector3(a) and isVector3(b) then return a + (b - a) * t end
+	if isVector2(a) and isVector2(b) then return a + (b - a) * t end
+	if type(a) == "number" and type(b) == "number" then return a + (b - a) * t end
+	error("lerp: mismatched types")
+end
+
+function VecUtils.slerp(a, b, t)
+	if isVector3(a) and isVector3(b) then
+		local ak = a.Magnitude; local bk = b.Magnitude
+		if ak <= EPS or bk <= EPS then return VecUtils.lerp(a,b,t) end
+		local ua = a / ak; local ub = b / bk
+		local dotv = ua:Dot(ub)
+		if dotv > 0.9999 then -- nearly parallel: lerp and renormalize scale interpolation
+			local out = ua + (ub - ua) * t
+			return out.Unit * (ak + (bk - ak) * t)
+		elseif dotv < -0.9999 then -- opposite: pick orthonormal tangent
+			local orth = Vector3.new(1,0,0):Cross(ua)
+			if orth.Magnitude <= EPS then orth = Vector3.new(0,1,0):Cross(ua) end
+			orth = orth.Unit
+			local theta = math.acos(max(-1, min(1, dotv)))
+			local m = sin((1-t)*theta)/sin(theta)
+			local n = sin(t*theta)/sin(theta)
+			local outDir = ua * m + orth * n
+			return outDir * (ak + (bk - ak) * t)
+		else
+			local theta = acos(max(-1, min(1, dotv)))
+			local s1 = sin((1 - t) * theta) / sin(theta)
+			local s2 = sin(t * theta) / sin(theta)
+			local dir = ua * s1 + ub * s2
+			return dir * (ak + (bk - ak) * t)
+		end
+	end
+	error("slerp: only Vector3 supported")
+end
+
+function VecUtils.closestPointOnLine(p, a, b)
+	if isVector3(p) and isVector3(a) and isVector3(b) then
+		local ab = b - a
+		local denom = ab:Dot(ab)
+		if denom <= EPS then return a end
+		local t = (p - a):Dot(ab) / denom
+		return a + ab * t, t
+	end
+	if isVector2(p) and isVector2(a) and isVector2(b) then
+		local abx, aby = b.X - a.X, b.Y - a.Y
+		local denom = abx*abx + aby*aby
+		if denom <= EPS then return a end
+		local t = ((p.X - a.X)*abx + (p.Y - a.Y)*aby) / denom
+		return a + (b - a) * t, t
+	end
+	error("closestPointOnLine: mismatched types")
+end
+
+function VecUtils.closestPointOnSegment(p, a, b)
+	local pt, t = VecUtils.closestPointOnLine(p, a, b)
+	if t <= 0 then return a, 0 end
+	if t >= 1 then return b, 1 end
+	return pt, t
+end
+
+function VecUtils.distancePointToSegment(p, a, b)
+	local cp = VecUtils.closestPointOnSegment(p, a, b)
+	return (cp - p).Magnitude
+end
+
+function VecUtils.pointPlaneDistance(pt, planePoint, planeNormal)
+	local n = planeNormal
+	local denom = n:Dot(n)
+	if denom <= EPS then return 0 end
+	return (pt - planePoint):Dot(n) / sqrt(denom)
+end
+
+function VecUtils.linePlaneIntersection(origin, dir, planePoint, planeNormal)
+	local denom = planeNormal:Dot(dir)
+	if abs(denom) <= EPS then return nil end
+	local t = planeNormal:Dot(planePoint - origin) / denom
+	return t
+end
+
+function VecUtils.raySphereIntersect(origin, dir, center, radius)
+	local L = origin - center
+	local a = dir:Dot(dir)
+	local b = 2 * dir:Dot(L)
+	local c = L:Dot(L) - radius*radius
+	local disc = b*b - 4*a*c
+	if disc < 0 then return nil end
+	local sd = sqrt(disc)
+	local t0 = (-b - sd) / (2*a)
+	local t1 = (-b + sd) / (2*a)
+	if t0 > t1 then t0, t1 = t1, t0 end
+	return t0, t1
+end
+
+function VecUtils.rayPlane(origin, dir, planePoint, planeNormal)
+	local t = VecUtils.linePlaneIntersection(origin, dir, planePoint, planeNormal)
+	if not t then return nil end
+	if t < 0 then return nil end
+	return origin + dir * t, t
+end
+
+function VecUtils.closestPointOnTriangle(p, a, b, c)
+	local ab = b - a; local ac = c - a; local ap = p - a
+	local d1 = ab:Dot(ap); local d2 = ac:Dot(ap)
+	if d1 <= 0 and d2 <= 0 then return a end
+
+	local bp = p - b
+	local d3 = ab:Dot(bp); local d4 = ac:Dot(bp)
+	if d3 >= 0 and d4 <= d3 then return b end
+
+	local vc = d1 * d4 - d3 * d2
+	if vc <= 0 and d1 >= 0 and d3 <= 0 then
+		local v = d1 / (d1 - d3)
+		return a + ab * v
+	end
+
+	local cp = p - c
+	local d5 = ab:Dot(cp); local d6 = ac:Dot(cp)
+	if d6 >= 0 and d5 <= d6 then return c end
+
+	local vb = d5 * d2 - d1 * d6
+	if vb <= 0 and d2 >= 0 and d6 <= 0 then
+		local w = d2 / (d2 - d6)
+		return a + ac * w
+	end
+
+	local va = d3 * d6 - d5 * d4
+	if va <= 0 and (d4 - d3) >= 0 and (d5 - d6) >= 0 then
+		local w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+		return b + (c - b) * w
+	end
+
+	local denom = 1 / (va + vb + vc)
+	local v = vb * denom
+	local w = vc * denom
+	return a + ab * v + ac * w
+end
+
+function VecUtils.pointInTriangle(p, a, b, c)
+	local v0 = c - a; local v1 = b - a; local v2 = p - a
+	local dot00 = v0:Dot(v0); local dot01 = v0:Dot(v1)
+	local dot02 = v0:Dot(v2); local dot11 = v1:Dot(v1); local dot12 = v1:Dot(v2)
+	local denom = dot00 * dot11 - dot01 * dot01
+	if abs(denom) <= EPS then return false end
+	local u = (dot11 * dot02 - dot01 * dot12) / denom
+	local v = (dot00 * dot12 - dot01 * dot02) / denom
+	return u >= 0 and v >= 0 and (u + v) <= 1
+end
+
+function VecUtils.triangleArea(a, b, c)
+	return 0.5 * (b - a):Cross(c - a).Magnitude
+end
+
+function VecUtils.triangleNormal(a, b, c)
+	local n = (b - a):Cross(c - a)
+	local m = n.Magnitude
+	if m <= EPS then return Vector3.new(0,1,0) end
+	return n / m
+end
+
+function VecUtils.planeFromPoints(a, b, c)
+	local n = (b - a):Cross(c - a)
+	local m = n.Magnitude
+	if m <= EPS then return a, Vector3.new(0,1,0) end
+	return a, n / m
+end
+
+function VecUtils.buildOrthonormalBasis(n)
+	local helper = abs(n.X) > abs(n.Z) and Vector3.new(-n.Y, n.X, 0) or Vector3.new(0, -n.Z, n.Y)
+	local t = helper
+	if t.Magnitude <= EPS then -- fallback
+		t = Vector3.new(1, 0, 0)
+	end
+	t = t.Unit
+	local b = n:Cross(t)
+	return t, b
+end
+
+function VecUtils.closestPointsBetweenSegments(p1, q1, p2, q2)
+	local d1 = q1 - p1; local d2 = q2 - p2; local r = p1 - p2
+	local a = d1:Dot(d1); local e = d2:Dot(d2); local f = d2:Dot(r)
+	local s, t
+	if a <= EPS and e <= EPS then
+		return p1, p2, 0, 0
+	end
+	if a <= EPS then
+		s = 0; t = f / e; t = min(max(t,0),1)
+	else
+		local c = d1:Dot(r)
+		if e <= EPS then
+			t = 0; s = min(max(-c / a, 0), 1)
+		else
+			local b = d1:Dot(d2)
+			local denom = a * e - b * b
+			if denom ~= 0 then s = min(max((b * f - c * e) / denom, 0), 1) else s = 0 end
+			local tnom = b * s + f
+			if tnom < 0 then t = 0; s = min(max(-c / a, 0), 1)
+			elseif tnom > e then t = 1; s = min(max((b - c) / a, 0), 1)
+			else t = tnom / e end
+		end
+	end
+	local cp1 = p1 + d1 * s
+	local cp2 = p2 + d2 * t
+	return cp1, cp2, s, t
+end
+
+function VecUtils.projectPointOnPlane(point, planePoint, planeNormal)
+	local d = (point - planePoint):Dot(planeNormal)
+	return point - planeNormal * d
+end
+
+function VecUtils.isNearlyZero(v, eps)
+	eps = eps or EPS
+	if isVector3(v) then return v.Magnitude <= eps end
+	if isVector2(v) then return v.Magnitude <= eps end
+	return false
+end
+
+return VecUtils

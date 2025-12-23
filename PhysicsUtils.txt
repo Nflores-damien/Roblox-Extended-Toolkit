@@ -1,0 +1,124 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
+local PhysicsUtils = {}
+PhysicsUtils.__index = PhysicsUtils
+
+local sqrt, abs, min, max = math.sqrt, math.abs, math.min, math.max
+local Vector3_new, Vector3_dot = Vector3.new, Vector3.new
+
+local function isVector3(v) return typeof and typeof(v) == "Vector3" end
+
+PhysicsUtils.AABB = {}
+function PhysicsUtils.AABB.new(minPoint, maxPoint)
+	return {Min = minPoint, Max = maxPoint}
+end
+
+function PhysicsUtils.AABB.contains(aabb, point)
+	return point.X >= aabb.Min.X and point.X <= aabb.Max.X and
+		point.Y >= aabb.Min.Y and point.Y <= aabb.Max.Y and
+		point.Z >= aabb.Min.Z and point.Z <= aabb.Max.Z
+end
+
+function PhysicsUtils.AABB.closestPoint(aabb, point)
+	local x = min(max(point.X, aabb.Min.X), aabb.Max.X)
+	local y = min(max(point.Y, aabb.Min.Y), aabb.Max.Y)
+	local z = min(max(point.Z, aabb.Min.Z), aabb.Max.Z)
+	return Vector3_new(x, y, z)
+end
+
+function PhysicsUtils.AABB.distance(aabb, point)
+	return (PhysicsUtils.AABB.closestPoint(aabb, point) - point).Magnitude
+end
+
+PhysicsUtils.Sphere = {}
+function PhysicsUtils.Sphere.new(center, radius)
+	return {Center = center, Radius = radius}
+end
+
+function PhysicsUtils.Sphere.contains(sphere, point)
+	return (point - sphere.Center).Magnitude <= sphere.Radius
+end
+
+function PhysicsUtils.Sphere.closestPoint(sphere, point)
+	local dir = point - sphere.Center
+	local mag = dir.Magnitude
+	if mag <= sphere.Radius then return point end
+	return sphere.Center + dir.Unit * sphere.Radius
+end
+
+PhysicsUtils.Capsule = {}
+function PhysicsUtils.Capsule.new(a, b, radius)
+	return {A = a, B = b, Radius = radius}
+end
+
+function PhysicsUtils.Capsule.closestPoint(capsule, point)
+	local ab = capsule.B - capsule.A
+	local t = ((point - capsule.A):Dot(ab)) / ab:Dot(ab)
+	t = min(max(t, 0), 1)
+	local closest = capsule.A + ab * t
+	local dir = point - closest
+	if dir.Magnitude <= capsule.Radius then return point end
+	return closest + dir.Unit * capsule.Radius
+end
+
+function PhysicsUtils.Capsule.distance(capsule, point)
+	return (PhysicsUtils.Capsule.closestPoint(capsule, point) - point).Magnitude
+end
+
+function PhysicsUtils.rayIntersectsAABB(origin, direction, aabb)
+	local tmin = -math.huge
+	local tmax = math.huge
+
+	for _,axis in ipairs({"X","Y","Z"}) do
+		local o = origin[axis]
+		local d = direction[axis]
+		local minA = aabb.Min[axis]
+		local maxA = aabb.Max[axis]
+
+		if abs(d) < 1e-8 then
+			if o < minA or o > maxA then return false, nil end
+		else
+			local t1 = (minA - o)/d
+			local t2 = (maxA - o)/d
+			if t1 > t2 then t1, t2 = t2, t1 end
+			tmin = max(tmin, t1)
+			tmax = min(tmax, t2)
+			if tmin > tmax then return false, nil end
+		end
+	end
+	return true, tmin
+end
+
+function PhysicsUtils.sphereIntersectsSphere(s1, s2)
+	return (s1.Center - s2.Center).Magnitude <= (s1.Radius + s2.Radius)
+end
+
+-- (approx)
+function PhysicsUtils.capsuleIntersectsCapsule(c1, c2)
+	local function closestDistance(a0, a1, b0, b1)
+		local da = a1 - a0
+		local db = b1 - b0
+		local r = a0 - b0
+		local a = da:Dot(da)
+		local e = db:Dot(db)
+		local f = db:Dot(r)
+		local c = da:Dot(r)
+		local b = da:Dot(db)
+		local denom = a*e - b*b
+		local s = 0
+		local t = 0
+		if denom ~= 0 then
+			s = (b*f - c*e)/denom
+			s = min(max(s,0),1)
+		end
+		t = (b*s + f)/e
+		t = min(max(t,0),1)
+		local pA = a0 + da*s
+		local pB = b0 + db*t
+		return (pA - pB).Magnitude
+	end
+	return closestDistance(c1.A,c1.B,c2.A,c2.B) <= (c1.Radius + c2.Radius)
+end
+
+return PhysicsUtils
