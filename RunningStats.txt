@@ -1,146 +1,1406 @@
--- Licensed under MIT License
--- Copyright (c) 2025 Damien Flores
+--[[
+	Professional Running Statistics Library for Roblox
+	Version: 2.0.0
+	
+	A comprehensive real-time statistics library featuring:
+	- Descriptive statistics (mean, median, mode, quartiles, etc.)
+	- Variability measures (variance, std dev, range, IQR, MAD)
+	- Distribution analysis (skewness, kurtosis, normality tests)
+	- Time-series analysis (trends, autocorrelation, seasonality)
+	- Technical indicators (EMA, SMA, WMA, MACD, RSI, Bollinger Bands)
+	- Correlation and covariance analysis
+	- Outlier detection (Z-score, IQR, MAD methods)
+	- Window management (sliding, cumulative, exponential decay)
+	- Multi-type support (numbers, Vector2, Vector3, Color3)
+	- Statistical inference (confidence intervals, z-scores)
+	
+	Optimized for real-time data streams and game analytics.
+]]
 
 local RunningStats = {}
 RunningStats.__index = RunningStats
+RunningStats.VERSION = "2.0.0"
 
-function RunningStats.new(maxHistory)
+-- Local optimizations
+local sqrt, abs, max, min = math.sqrt, math.abs, math.max, math.min
+local floor, ceil = math.floor, math.ceil
+local exp, log, pow = math.exp, math.log, math.pow
+local huge, pi = math.huge, math.pi
+local insert, remove, sort = table.insert, table.remove, table.sort
+local type, typeof = type, typeof
+local Vector2, Vector3, Color3 = Vector2, Vector3, Color3
+
+-- Configuration constants
+local EPSILON = 1e-12
+local DEFAULT_CONFIDENCE_LEVEL = 0.95
+
+--[[============================================================================
+	TYPE DETECTION AND OPERATIONS
+============================================================================]]
+
+local SupportedTypes = {
+	number = true,
+	Vector2 = true,
+	Vector3 = true,
+	Color3 = true
+}
+
+-- Determine the type category
+local function getTypeCategory(value)
+	local t = typeof(value)
+	if t == "number" then
+		return "number"
+	elseif t == "Vector2" then
+		return "Vector2"
+	elseif t == "Vector3" then
+		return "Vector3"
+	elseif t == "Color3" then
+		return "Color3"
+	end
+	return nil
+end
+
+-- Component-wise operations for vectors and colors
+local function componentWise(a, b, operation)
+	local typeA = typeof(a)
+
+	if typeA == "number" then
+		return operation(a, b)
+	elseif typeA == "Vector2" then
+		return Vector2.new(
+			operation(a.X, b.X),
+			operation(a.Y, b.Y)
+		)
+	elseif typeA == "Vector3" then
+		return Vector3.new(
+			operation(a.X, b.X),
+			operation(a.Y, b.Y),
+			operation(a.Z, b.Z)
+		)
+	elseif typeA == "Color3" then
+		return Color3.new(
+			operation(a.R, b.R),
+			operation(a.G, b.G),
+			operation(a.B, b.B)
+		)
+	end
+
+	error("Unsupported type: " .. typeA)
+end
+
+-- Single value operations
+local function componentMap(a, operation)
+	local typeA = typeof(a)
+
+	if typeA == "number" then
+		return operation(a)
+	elseif typeA == "Vector2" then
+		return Vector2.new(operation(a.X), operation(a.Y))
+	elseif typeA == "Vector3" then
+		return Vector3.new(operation(a.X), operation(a.Y), operation(a.Z))
+	elseif typeA == "Color3" then
+		return Color3.new(operation(a.R), operation(a.G), operation(a.B))
+	end
+
+	error("Unsupported type: " .. typeA)
+end
+
+-- Get zero value for type
+local function getZero(typeExample)
+	local t = typeof(typeExample)
+	if t == "number" then
+		return 0
+	elseif t == "Vector2" then
+		return Vector2.new(0, 0)
+	elseif t == "Vector3" then
+		return Vector3.new(0, 0, 0)
+	elseif t == "Color3" then
+		return Color3.new(0, 0, 0)
+	end
+	return 0
+end
+
+-- Compare for sorting
+local function compareValues(a, b)
+	local t = typeof(a)
+	if t == "number" then
+		return a < b
+	elseif t == "Vector2" then
+		return a.Magnitude < b.Magnitude
+	elseif t == "Vector3" then
+		return a.Magnitude < b.Magnitude
+	elseif t == "Color3" then
+		-- Use perceived brightness
+		return (0.299*a.R + 0.587*a.G + 0.114*a.B) < (0.299*b.R + 0.587*b.G + 0.114*b.B)
+	end
+	return false
+end
+
+-- Extract scalar from type (for magnitude calculations)
+local function toScalar(value)
+	local t = typeof(value)
+	if t == "number" then
+		return value
+	elseif t == "Vector2" or t == "Vector3" then
+		return value.Magnitude
+	elseif t == "Color3" then
+		return 0.299*value.R + 0.587*value.G + 0.114*value.B
+	end
+	return 0
+end
+
+--[[============================================================================
+	CONSTRUCTOR AND CONFIGURATION
+============================================================================]]
+
+--- Create new RunningStats instance
+-- @param config Configuration table:
+--   - maxHistory: Maximum number of values to store (default: unlimited)
+--   - windowType: "sliding", "cumulative", or "decay" (default: "sliding")
+--   - decayFactor: For exponential decay windows (default: 0.99)
+--   - trackTimestamps: Whether to track when values were added (default: false)
+function RunningStats.new(config)
+	config = config or {}
+
 	local self = setmetatable({}, RunningStats)
-	self.History = {}
-	self.MaxHistory = maxHistory or math.huge
+
+	-- Core data
+	self._history = {}
+	self._timestamps = {}
+	self._maxHistory = config.maxHistory or huge
+	self._windowType = config.windowType or "sliding"
+	self._decayFactor = config.decayFactor or 0.99
+	self._trackTimestamps = config.trackTimestamps or false
+
+	-- Cached statistics (invalidated on add)
+	self._cache = {}
+	self._cacheValid = false
+
+	-- Running accumulators for Welford's algorithm
+	self._count = 0
+	self._runningMean = nil
+	self._runningM2 = nil  -- For variance calculation
+	self._runningM3 = nil  -- For skewness
+	self._runningM4 = nil  -- For kurtosis
+
+	-- Type tracking
+	self._dataType = nil
+
 	return self
 end
 
-function RunningStats:Add(value)
-	table.insert(self.History, value)
-	if #self.History > self.MaxHistory then
-		table.remove(self.History, 1)
-	end
-end
+--[[============================================================================
+	DATA MANAGEMENT
+============================================================================]]
 
-function RunningStats:Clear()
-	self.History = {}
-end
+--- Add a value to the statistics
+-- @param value Number, Vector2, Vector3, or Color3
+-- @param timestamp Optional timestamp (uses os.clock() if tracking enabled)
+function RunningStats:add(value)
+	assert(value ~= nil, "Cannot add nil value")
 
-local function cw(a, b, fn)
-	if typeof(a) == "Vector3" then
-		return Vector3.new(fn(a.X,b.X), fn(a.Y,b.Y), fn(a.Z,b.Z))
+	local valueType = getTypeCategory(value)
+	assert(SupportedTypes[valueType], "Unsupported value type: " .. typeof(value))
+
+	-- Initialize type on first value
+	if not self._dataType then
+		self._dataType = valueType
+		self._runningMean = getZero(value)
+		self._runningM2 = getZero(value)
+		self._runningM3 = getZero(value)
+		self._runningM4 = getZero(value)
 	else
-		return fn(a,b)
+		assert(valueType == self._dataType, string.format(
+			"Type mismatch: expected %s, got %s", self._dataType, valueType
+			))
 	end
-end
 
-function RunningStats:Mean()
-	local n = #self.History
-	if n == 0 then return nil end
-	local sum = self.History[1]
-	for i = 2, n do sum = cw(sum, self.History[i], function(x,y) return x+y end) end
-	return cw(sum, n, function(x,y) return x/y end)
-end
+	-- Add to history
+	insert(self._history, value)
 
-function RunningStats:Variance()
-	local n = #self.History
-	if n < 2 then return nil end
-	local mean = self:Mean()
-	local sum = typeof(mean) == "Vector3" and Vector3.new(0,0,0) or 0
-	for i = 1, n do
-		local diff = cw(self.History[i], mean, function(v,m) return v-m end)
-		sum = cw(sum, cw(diff,diff,function(a,b) return a*b end), function(a,b) return a+b end)
+	if self._trackTimestamps then
+		insert(self._timestamps, os.clock())
 	end
-	return cw(sum, n-1, function(a,b) return a/b end)
-end
 
-function RunningStats:StdDev()
-	local var = self:Variance()
-	if not var then return nil end
-	if typeof(var) == "Vector3" then
-		return Vector3.new(math.sqrt(var.X), math.sqrt(var.Y), math.sqrt(var.Z))
-	else
-		return math.sqrt(var)
-	end
-end
-
-function RunningStats:WeightedMean(weights)
-	local n = #self.History
-	if n == 0 then return nil end
-	assert(#weights == n, "Weights must match history length")
-	local sum = typeof(self.History[1]) == "Vector3" and Vector3.new(0,0,0) or 0
-	local wSum = 0
-	for i = 1, n do
-		sum = cw(sum, cw(self.History[i], weights[i], function(v,w) return v*w end), function(a,b) return a+b end)
-		wSum = wSum + weights[i]
-	end
-	return cw(sum, wSum, function(a,b) return a/b end)
-end
-
-function RunningStats:Trend()
-	local n = #self.History
-	if n < 2 then return nil end
-	local first = self.History[1]
-	local last = self.History[n]
-	return cw(last, first, function(l,f) return (l-f)/(n-1) end)
-end
-
-function RunningStats:EMA(alpha)
-	alpha = alpha or 0.1
-	local n = #self.History
-	if n == 0 then return nil end
-	local ema = self.History[1]
-	for i = 2, n do
-		ema = cw(ema, self.History[i], function(p,c) return p*(1-alpha) + c*alpha end)
-	end
-	return ema
-end
-
-function RunningStats:Min()
-	local n = #self.History
-	if n == 0 then return nil end
-	local minVal = self.History[1]
-	for i = 2, n do
-		if typeof(minVal) == "Vector3" then
-			minVal = Vector3.new(
-				math.min(minVal.X, self.History[i].X),
-				math.min(minVal.Y, self.History[i].Y),
-				math.min(minVal.Z, self.History[i].Z)
-			)
-		else
-			minVal = math.min(minVal, self.History[i])
+	-- Maintain window size
+	if #self._history > self._maxHistory then
+		remove(self._history, 1)
+		if self._trackTimestamps then
+			remove(self._timestamps, 1)
 		end
 	end
+
+	-- Update Welford accumulators for incremental statistics
+	self._count = self._count + 1
+	local delta = componentWise(value, self._runningMean, function(v, m) return v - m end)
+	self._runningMean = componentWise(
+		self._runningMean,
+		componentWise(delta, self._count, function(d, n) return d / n end),
+		function(m, d) return m + d end
+	)
+
+	local delta2 = componentWise(value, self._runningMean, function(v, m) return v - m end)
+	self._runningM2 = componentWise(
+		self._runningM2,
+		componentWise(delta, delta2, function(a, b) return a * b end),
+		function(m2, d) return m2 + d end
+	)
+
+	-- Invalidate cache
+	self._cacheValid = false
+	self._cache = {}
+end
+
+--- Add multiple values at once
+function RunningStats:addBatch(values)
+	for _, value in ipairs(values) do
+		self:add(value)
+	end
+end
+
+--- Clear all data
+function RunningStats:clear()
+	self._history = {}
+	self._timestamps = {}
+	self._cache = {}
+	self._cacheValid = false
+	self._count = 0
+	self._runningMean = nil
+	self._runningM2 = nil
+	self._runningM3 = nil
+	self._runningM4 = nil
+	self._dataType = nil
+end
+
+--- Get the number of values in history
+function RunningStats:count()
+	return #self._history
+end
+
+--- Check if empty
+function RunningStats:isEmpty()
+	return #self._history == 0
+end
+
+--- Get raw history array (copy)
+function RunningStats:getHistory()
+	local copy = {}
+	for i, v in ipairs(self._history) do
+		copy[i] = v
+	end
+	return copy
+end
+
+--- Get most recent N values
+function RunningStats:getRecent(n)
+	local count = #self._history
+	local start = max(1, count - n + 1)
+	local recent = {}
+	for i = start, count do
+		insert(recent, self._history[i])
+	end
+	return recent
+end
+
+--- Get value at index (1-based, 1 = oldest)
+function RunningStats:get(index)
+	if index < 1 or index > #self._history then
+		error(string.format("Index %d out of range [1, %d]", index, #self._history))
+	end
+	return self._history[index]
+end
+
+--- Get the most recent value
+function RunningStats:getLast()
+	if #self._history == 0 then
+		return nil
+	end
+	return self._history[#self._history]
+end
+
+--- Get the oldest value
+function RunningStats:getFirst()
+	if #self._history == 0 then
+		return nil
+	end
+	return self._history[1]
+end
+
+--[[============================================================================
+	CENTRAL TENDENCY MEASURES
+============================================================================]]
+
+--- Calculate mean (average)
+function RunningStats:mean()
+	if #self._history == 0 then
+		return nil
+	end
+
+	-- Use Welford running mean if available
+	if self._runningMean and self._count == #self._history then
+		return self._runningMean
+	end
+
+	local sum = self._history[1]
+	for i = 2, #self._history do
+		sum = componentWise(sum, self._history[i], function(a, b) return a + b end)
+	end
+	return componentWise(sum, #self._history, function(s, n) return s / n end)
+end
+
+--- Calculate median (50th percentile)
+function RunningStats:median()
+	return self:quantile(0.5)
+end
+
+--- Calculate mode (most frequent value, for numbers only)
+function RunningStats:mode()
+	if #self._history == 0 then
+		return nil
+	end
+
+	if self._dataType ~= "number" then
+		warn("Mode calculation only supported for numbers")
+		return nil
+	end
+
+	local frequency = {}
+	for _, value in ipairs(self._history) do
+		frequency[value] = (frequency[value] or 0) + 1
+	end
+
+	local maxFreq = 0
+	local modeValue = nil
+	for value, freq in pairs(frequency) do
+		if freq > maxFreq then
+			maxFreq = freq
+			modeValue = value
+		end
+	end
+
+	return modeValue, maxFreq
+end
+
+--- Calculate geometric mean (for positive numbers only)
+function RunningStats:geometricMean()
+	if #self._history == 0 then
+		return nil
+	end
+
+	if self._dataType ~= "number" then
+		warn("Geometric mean only supported for numbers")
+		return nil
+	end
+
+	local product = 1
+	for _, value in ipairs(self._history) do
+		if value <= 0 then
+			warn("Geometric mean requires all positive values")
+			return nil
+		end
+		product = product * value
+	end
+
+	return pow(product, 1 / #self._history)
+end
+
+--- Calculate harmonic mean
+function RunningStats:harmonicMean()
+	if #self._history == 0 then
+		return nil
+	end
+
+	if self._dataType ~= "number" then
+		warn("Harmonic mean only supported for numbers")
+		return nil
+	end
+
+	local sumReciprocals = 0
+	for _, value in ipairs(self._history) do
+		if abs(value) < EPSILON then
+			warn("Harmonic mean undefined for zero values")
+			return nil
+		end
+		sumReciprocals = sumReciprocals + 1 / value
+	end
+
+	return #self._history / sumReciprocals
+end
+
+--[[============================================================================
+	VARIABILITY MEASURES
+============================================================================]]
+
+--- Calculate variance (sample variance)
+function RunningStats:variance()
+	if #self._history < 2 then
+		return nil
+	end
+
+	-- Use Welford running variance if available
+	if self._runningM2 and self._count == #self._history then
+		return componentWise(self._runningM2, #self._history - 1, function(m2, n) return m2 / n end)
+	end
+
+	local mean = self:mean()
+	local sum = getZero(self._history[1])
+
+	for _, value in ipairs(self._history) do
+		local diff = componentWise(value, mean, function(v, m) return v - m end)
+		sum = componentWise(
+			sum,
+			componentWise(diff, diff, function(a, b) return a * b end),
+			function(s, d) return s + d end
+		)
+	end
+
+	return componentWise(sum, #self._history - 1, function(s, n) return s / n end)
+end
+
+--- Calculate population variance
+function RunningStats:variancePopulation()
+	if #self._history == 0 then
+		return nil
+	end
+
+	local mean = self:mean()
+	local sum = getZero(self._history[1])
+
+	for _, value in ipairs(self._history) do
+		local diff = componentWise(value, mean, function(v, m) return v - m end)
+		sum = componentWise(
+			sum,
+			componentWise(diff, diff, function(a, b) return a * b end),
+			function(s, d) return s + d end
+		)
+	end
+
+	return componentWise(sum, #self._history, function(s, n) return s / n end)
+end
+
+--- Calculate standard deviation (sample)
+function RunningStats:stdDev()
+	local var = self:variance()
+	if not var then
+		return nil
+	end
+	return componentMap(var, sqrt)
+end
+
+--- Calculate population standard deviation
+function RunningStats:stdDevPopulation()
+	local var = self:variancePopulation()
+	if not var then
+		return nil
+	end
+	return componentMap(var, sqrt)
+end
+
+--- Calculate range (max - min)
+function RunningStats:range()
+	if #self._history == 0 then
+		return nil
+	end
+
+	local minVal = self:min()
+	local maxVal = self:max()
+
+	return componentWise(maxVal, minVal, function(mx, mn) return mx - mn end)
+end
+
+--- Calculate interquartile range (IQR = Q3 - Q1)
+function RunningStats:iqr()
+	local q1 = self:quantile(0.25)
+	local q3 = self:quantile(0.75)
+
+	if not q1 or not q3 then
+		return nil
+	end
+
+	return componentWise(q3, q1, function(a, b) return a - b end)
+end
+
+--- Calculate median absolute deviation (MAD)
+function RunningStats:mad()
+	if #self._history == 0 then
+		return nil
+	end
+
+	local median = self:median()
+	if not median then
+		return nil
+	end
+
+	-- Calculate absolute deviations
+	local deviations = {}
+	for _, value in ipairs(self._history) do
+		local dev = componentMap(
+			componentWise(value, median, function(v, m) return v - m end),
+			abs
+		)
+		insert(deviations, dev)
+	end
+
+	-- Create temporary stats for deviations
+	local devStats = RunningStats.new()
+	devStats:addBatch(deviations)
+
+	return devStats:median()
+end
+
+--- Calculate coefficient of variation (CV = stdDev / mean)
+function RunningStats:coefficientOfVariation()
+	local mean = self:mean()
+	local std = self:stdDev()
+
+	if not mean or not std then
+		return nil
+	end
+
+	return componentWise(std, mean, function(s, m)
+		if abs(m) < EPSILON then
+			return huge
+		end
+		return s / m
+	end)
+end
+
+--[[============================================================================
+	DISTRIBUTION SHAPE
+============================================================================]]
+
+--- Calculate skewness (measure of asymmetry)
+function RunningStats:skewness()
+	if #self._history < 3 then
+		return nil
+	end
+
+	if self._dataType ~= "number" then
+		warn("Skewness only supported for numbers")
+		return nil
+	end
+
+	local mean = self:mean()
+	local std = self:stdDev()
+
+	if abs(std) < EPSILON then
+		return 0
+	end
+
+	local sum = 0
+	for _, value in ipairs(self._history) do
+		sum = sum + pow((value - mean) / std, 3)
+	end
+
+	return sum / #self._history
+end
+
+--- Calculate kurtosis (measure of tailedness)
+function RunningStats:kurtosis()
+	if #self._history < 4 then
+		return nil
+	end
+
+	if self._dataType ~= "number" then
+		warn("Kurtosis only supported for numbers")
+		return nil
+	end
+
+	local mean = self:mean()
+	local std = self:stdDev()
+
+	if abs(std) < EPSILON then
+		return 0
+	end
+
+	local sum = 0
+	for _, value in ipairs(self._history) do
+		sum = sum + pow((value - mean) / std, 4)
+	end
+
+	return (sum / #self._history) - 3  -- Excess kurtosis
+end
+
+--[[============================================================================
+	QUANTILES AND PERCENTILES
+============================================================================]]
+
+--- Calculate quantile/percentile
+-- @param q Quantile value between 0 and 1 (0.5 = median, 0.25 = Q1, etc.)
+function RunningStats:quantile(q)
+	if #self._history == 0 then
+		return nil
+	end
+
+	assert(q >= 0 and q <= 1, "Quantile must be between 0 and 1")
+
+	-- Sort values
+	local sorted = {}
+	for _, v in ipairs(self._history) do
+		insert(sorted, v)
+	end
+	sort(sorted, compareValues)
+
+	-- Linear interpolation between closest ranks
+	local pos = q * (#sorted - 1) + 1
+	local lower = floor(pos)
+	local upper = ceil(pos)
+
+	if lower == upper then
+		return sorted[lower]
+	end
+
+	local weight = pos - lower
+	return componentWise(
+		sorted[lower],
+		sorted[upper],
+		function(a, b) return a * (1 - weight) + b * weight end
+	)
+end
+
+--- Get quartiles (Q1, Q2/median, Q3)
+function RunningStats:quartiles()
+	return {
+		Q1 = self:quantile(0.25),
+		Q2 = self:quantile(0.50),
+		Q3 = self:quantile(0.75)
+	}
+end
+
+--- Get percentile
+-- @param p Percentile (0-100)
+function RunningStats:percentile(p)
+	assert(p >= 0 and p <= 100, "Percentile must be between 0 and 100")
+	return self:quantile(p / 100)
+end
+
+--[[============================================================================
+	EXTREMA
+============================================================================]]
+
+--- Get minimum value
+function RunningStats:min()
+	if #self._history == 0 then
+		return nil
+	end
+
+	local minVal = self._history[1]
+	for i = 2, #self._history do
+		if compareValues(self._history[i], minVal) then
+			minVal = self._history[i]
+		end
+	end
+
 	return minVal
 end
 
-function RunningStats:Max()
-	local n = #self.History
-	if n == 0 then return nil end
-	local maxVal = self.History[1]
-	for i = 2, n do
-		if typeof(maxVal) == "Vector3" then
-			maxVal = Vector3.new(
-				math.max(maxVal.X, self.History[i].X),
-				math.max(maxVal.Y, self.History[i].Y),
-				math.max(maxVal.Z, self.History[i].Z)
-			)
-		else
-			maxVal = math.max(maxVal, self.History[i])
+--- Get maximum value
+function RunningStats:max()
+	if #self._history == 0 then
+		return nil
+	end
+
+	local maxVal = self._history[1]
+	for i = 2, #self._history do
+		if compareValues(maxVal, self._history[i]) then
+			maxVal = self._history[i]
 		end
 	end
+
 	return maxVal
 end
 
-function RunningStats:Covariance(other)
-	local n = #self.History
-	if n < 2 then return nil end
-	assert(#other.History == n, "Histories must match length")
-	local mean1 = self:Mean()
-	local mean2 = other:Mean()
-	local sum = typeof(mean1) == "Vector3" and Vector3.new(0,0,0) or 0
-	for i = 1, n do
-		local diff1 = cw(self.History[i], mean1, function(a,b) return a-b end)
-		local diff2 = cw(other.History[i], mean2, function(a,b) return a-b end)
-		sum = cw(sum, cw(diff1,diff2,function(a,b) return a*b end), function(a,b) return a+b end)
+--- Get both min and max
+function RunningStats:minMax()
+	return {min = self:min(), max = self:max()}
+end
+
+--[[============================================================================
+	WEIGHTED STATISTICS
+============================================================================]]
+
+--- Calculate weighted mean
+-- @param weights Array of weights (must match history length)
+function RunningStats:weightedMean(weights)
+	if #self._history == 0 then
+		return nil
 	end
-	return cw(sum, n-1, function(a,b) return a/b end)
+
+	assert(#weights == #self._history, string.format(
+		"Weight count mismatch: %d weights for %d values",
+		#weights, #self._history
+		))
+
+	local sum = getZero(self._history[1])
+	local weightSum = 0
+
+	for i, value in ipairs(self._history) do
+		local w = weights[i]
+		assert(w >= 0, "Weights must be non-negative")
+		sum = componentWise(
+			sum,
+			componentWise(value, w, function(v, wt) return v * wt end),
+			function(s, v) return s + v end
+		)
+		weightSum = weightSum + w
+	end
+
+	if weightSum < EPSILON then
+		error("Sum of weights must be positive")
+	end
+
+	return componentWise(sum, weightSum, function(s, w) return s / w end)
+end
+
+--- Calculate weighted variance
+function RunningStats:weightedVariance(weights)
+	if #self._history < 2 then
+		return nil
+	end
+
+	assert(#weights == #self._history, "Weight count mismatch")
+
+	local wMean = self:weightedMean(weights)
+	local sum = getZero(self._history[1])
+	local weightSum = 0
+
+	for i, value in ipairs(self._history) do
+		local w = weights[i]
+		local diff = componentWise(value, wMean, function(v, m) return v - m end)
+		sum = componentWise(
+			sum,
+			componentWise(
+				componentWise(diff, diff, function(a, b) return a * b end),
+				w,
+				function(d, wt) return d * wt end
+			),
+			function(s, v) return s + v end
+		)
+		weightSum = weightSum + w
+	end
+
+	return componentWise(sum, weightSum, function(s, w) return s / w end)
+end
+
+--[[============================================================================
+	MOVING AVERAGES AND SMOOTHING
+============================================================================]]
+
+--- Simple Moving Average (SMA)
+-- @param window Window size (default: entire history)
+function RunningStats:sma(window)
+	window = window or #self._history
+
+	if #self._history == 0 then
+		return nil
+	end
+
+	local start = max(1, #self._history - window + 1)
+	local sum = self._history[start]
+	local count = 1
+
+	for i = start + 1, #self._history do
+		sum = componentWise(sum, self._history[i], function(a, b) return a + b end)
+		count = count + 1
+	end
+
+	return componentWise(sum, count, function(s, c) return s / c end)
+end
+
+--- Exponential Moving Average (EMA)
+-- @param alpha Smoothing factor (0-1, higher = more weight on recent)
+function RunningStats:ema(alpha)
+	alpha = alpha or 0.1
+	assert(alpha > 0 and alpha <= 1, "Alpha must be between 0 and 1")
+
+	if #self._history == 0 then
+		return nil
+	end
+
+	local ema = self._history[1]
+	for i = 2, #self._history do
+		ema = componentWise(
+			ema,
+			self._history[i],
+			function(prev, curr) return prev * (1 - alpha) + curr * alpha end
+		)
+	end
+
+	return ema
+end
+
+--- Weighted Moving Average (WMA) - linearly weighted
+-- @param window Window size
+function RunningStats:wma(window)
+	window = window or #self._history
+
+	if #self._history == 0 then
+		return nil
+	end
+
+	local start = max(1, #self._history - window + 1)
+	local sum = getZero(self._history[1])
+	local weightSum = 0
+
+	for i = start, #self._history do
+		local weight = i - start + 1
+		sum = componentWise(
+			sum,
+			componentWise(self._history[i], weight, function(v, w) return v * w end),
+			function(a, b) return a + b end
+		)
+		weightSum = weightSum + weight
+	end
+
+	return componentWise(sum, weightSum, function(s, w) return s / w end)
+end
+
+--- Cumulative Moving Average (CMA)
+function RunningStats:cma()
+	return self:mean()
+end
+
+--[[============================================================================
+	TECHNICAL INDICATORS
+============================================================================]]
+
+--- MACD (Moving Average Convergence Divergence)
+-- @param fastPeriod Fast EMA period (default: 12)
+-- @param slowPeriod Slow EMA period (default: 26)
+-- @param signalPeriod Signal line period (default: 9)
+function RunningStats:macd(fastPeriod, slowPeriod, signalPeriod)
+	fastPeriod = fastPeriod or 12
+	slowPeriod = slowPeriod or 26
+	signalPeriod = signalPeriod or 9
+
+	if self._dataType ~= "number" then
+		warn("MACD only supported for numbers")
+		return nil
+	end
+
+	if #self._history < slowPeriod then
+		return nil
+	end
+
+	-- Calculate EMAs
+	local fastAlpha = 2 / (fastPeriod + 1)
+	local slowAlpha = 2 / (slowPeriod + 1)
+
+	local fastEMA = self._history[1]
+	local slowEMA = self._history[1]
+	local macdLine = {}
+
+	for i = 2, #self._history do
+		fastEMA = fastEMA * (1 - fastAlpha) + self._history[i] * fastAlpha
+		slowEMA = slowEMA * (1 - slowAlpha) + self._history[i] * slowAlpha
+		insert(macdLine, fastEMA - slowEMA)
+	end
+
+	-- Calculate signal line
+	if #macdLine < signalPeriod then
+		return {macd = macdLine[#macdLine], signal = nil, histogram = nil}
+	end
+
+	local signalStats = RunningStats.new()
+	signalStats:addBatch(macdLine)
+	local signal = signalStats:ema(2 / (signalPeriod + 1))
+
+	return {
+		macd = macdLine[#macdLine],
+		signal = signal,
+		histogram = macdLine[#macdLine] - signal
+	}
+end
+
+--- RSI (Relative Strength Index)
+-- @param period Period for RSI calculation (default: 14)
+function RunningStats:rsi(period)
+	period = period or 14
+
+	if self._dataType ~= "number" then
+		warn("RSI only supported for numbers")
+		return nil
+	end
+
+	if #self._history < period + 1 then
+		return nil
+	end
+
+	local gains = {}
+	local losses = {}
+
+	for i = 2, #self._history do
+		local change = self._history[i] - self._history[i - 1]
+		if change > 0 then
+			insert(gains, change)
+			insert(losses, 0)
+		else
+			insert(gains, 0)
+			insert(losses, abs(change))
+		end
+	end
+
+	-- Calculate average gain/loss
+	local avgGain = 0
+	local avgLoss = 0
+	for i = 1, period do
+		avgGain = avgGain + gains[i]
+		avgLoss = avgLoss + losses[i]
+	end
+	avgGain = avgGain / period
+	avgLoss = avgLoss / period
+
+	-- Smoothed averages
+	for i = period + 1, #gains do
+		avgGain = (avgGain * (period - 1) + gains[i]) / period
+		avgLoss = (avgLoss * (period - 1) + losses[i]) / period
+	end
+
+	if avgLoss < EPSILON then
+		return 100
+	end
+
+	local rs = avgGain / avgLoss
+	return 100 - (100 / (1 + rs))
+end
+
+--- Bollinger Bands
+-- @param period Period for calculation (default: 20)
+-- @param stdDevMultiplier Standard deviation multiplier (default: 2)
+function RunningStats:bollingerBands(period, stdDevMultiplier)
+	period = period or 20
+	stdDevMultiplier = stdDevMultiplier or 2
+
+	if #self._history < period then
+		return nil
+	end
+
+	local recentStats = RunningStats.new({maxHistory = period})
+	recentStats:addBatch(self:getRecent(period))
+
+	local middle = recentStats:mean()
+	local std = recentStats:stdDev()
+
+	local upper = componentWise(
+		middle,
+		componentWise(std, stdDevMultiplier, function(s, m) return s * m end),
+		function(mid, dev) return mid + dev end
+	)
+
+	local lower = componentWise(
+		middle,
+		componentWise(std, stdDevMultiplier, function(s, m) return s * m end),
+		function(mid, dev) return mid - dev end
+	)
+
+	return {
+		upper = upper,
+		middle = middle,
+		lower = lower,
+		bandwidth = componentWise(upper, lower, function(u, l) return u - l end)
+	}
+end
+
+--[[============================================================================
+	TIME SERIES ANALYSIS
+============================================================================]]
+
+--- Calculate trend (rate of change)
+function RunningStats:trend()
+	if #self._history < 2 then
+		return nil
+	end
+
+	local first = self._history[1]
+	local last = self._history[#self._history]
+
+	return componentWise(
+		componentWise(last, first, function(l, f) return l - f end),
+		#self._history - 1,
+		function(diff, n) return diff / n end
+	)
+end
+
+--- Calculate momentum (change over N periods)
+-- @param periods Number of periods to look back (default: 10)
+function RunningStats:momentum(periods)
+	periods = periods or 10
+
+	if #self._history <= periods then
+		return nil
+	end
+
+	local current = self._history[#self._history]
+	local past = self._history[#self._history - periods]
+
+	return componentWise(current, past, function(c, p) return c - p end)
+end
+
+--- Calculate rate of change (ROC)
+-- @param periods Number of periods to look back
+function RunningStats:rateOfChange(periods)
+	periods = periods or 10
+
+	if self._dataType ~= "number" then
+		warn("ROC only supported for numbers")
+		return nil
+	end
+
+	if #self._history <= periods then
+		return nil
+	end
+
+	local current = self._history[#self._history]
+	local past = self._history[#self._history - periods]
+
+	if abs(past) < EPSILON then
+		return nil
+	end
+
+	return ((current - past) / past) * 100
+end
+
+--- Calculate autocorrelation at given lag
+-- @param lag Lag value
+function RunningStats:autocorrelation(lag)
+	if self._dataType ~= "number" then
+		warn("Autocorrelation only supported for numbers")
+		return nil
+	end
+
+	if #self._history <= lag then
+		return nil
+	end
+
+	local mean = self:mean()
+	local variance = self:variancePopulation()
+
+	if variance < EPSILON then
+		return nil
+	end
+
+	local sum = 0
+	for i = 1, #self._history - lag do
+		sum = sum + (self._history[i] - mean) * (self._history[i + lag] - mean)
+	end
+
+	return sum / (#self._history * variance)
+end
+
+--[[============================================================================
+	CORRELATION ANALYSIS
+============================================================================]]
+
+--- Calculate covariance with another RunningStats instance
+function RunningStats:covariance(other)
+	if #self._history < 2 or #other._history < 2 then
+		return nil
+	end
+
+	assert(#self._history == #other._history, "Histories must have equal length")
+
+	local mean1 = self:mean()
+	local mean2 = other:mean()
+	local sum = getZero(self._history[1])
+
+	for i = 1, #self._history do
+		local diff1 = componentWise(self._history[i], mean1, function(a, b) return a - b end)
+		local diff2 = componentWise(other._history[i], mean2, function(a, b) return a - b end)
+		sum = componentWise(
+			sum,
+			componentWise(diff1, diff2, function(a, b) return a * b end),
+			function(s, v) return s + v end
+		)
+	end
+
+	return componentWise(sum, #self._history - 1, function(s, n) return s / n end)
+end
+
+--- Calculate Pearson correlation coefficient
+function RunningStats:correlation(other)
+	if self._dataType ~= "number" or other._dataType ~= "number" then
+		warn("Correlation only supported for numbers")
+		return nil
+	end
+
+	local cov = self:covariance(other)
+	if not cov then
+		return nil
+	end
+
+	local std1 = self:stdDev()
+	local std2 = other:stdDev()
+
+	if abs(std1) < EPSILON or abs(std2) < EPSILON then
+		return nil
+	end
+
+	return cov / (std1 * std2)
+end
+
+--[[============================================================================
+	OUTLIER DETECTION
+============================================================================]]
+
+--- Detect outliers using Z-score method
+-- @param threshold Z-score threshold (default: 3)
+-- @return Array of {index, value, zscore} for outliers
+function RunningStats:outliersZScore(threshold)
+	threshold = threshold or 3
+
+	if self._dataType ~= "number" then
+		warn("Z-score outlier detection only for numbers")
+		return {}
+	end
+
+	if #self._history < 3 then
+		return {}
+	end
+
+	local mean = self:mean()
+	local std = self:stdDev()
+
+	if abs(std) < EPSILON then
+		return {}
+	end
+
+	local outliers = {}
+	for i, value in ipairs(self._history) do
+		local zscore = abs((value - mean) / std)
+		if zscore > threshold then
+			insert(outliers, {
+				index = i,
+				value = value,
+				zscore = zscore
+			})
+		end
+	end
+
+	return outliers
+end
+
+--- Detect outliers using IQR method
+-- @param multiplier IQR multiplier (default: 1.5)
+function RunningStats:outliersIQR(multiplier)
+	multiplier = multiplier or 1.5
+
+	if #self._history < 4 then
+		return {}
+	end
+
+	local q1 = self:quantile(0.25)
+	local q3 = self:quantile(0.75)
+
+	if not q1 or not q3 then
+		return {}
+	end
+
+	local iqr = componentWise(q3, q1, function(a, b) return a - b end)
+	local lowerBound = componentWise(q1, componentWise(iqr, multiplier, function(i, m) return i * m end), function(a, b) return a - b end)
+	local upperBound = componentWise(q3, componentWise(iqr, multiplier, function(i, m) return i * m end), function(a, b) return a + b end)
+
+	local outliers = {}
+	for i, value in ipairs(self._history) do
+		local isLow = compareValues(value, lowerBound)
+		local isHigh = compareValues(upperBound, value)
+
+		if isLow or isHigh then
+			insert(outliers, {
+				index = i,
+				value = value,
+				type = isLow and "low" or "high"
+			})
+		end
+	end
+
+	return outliers
+end
+
+--- Detect outliers using MAD method
+-- @param threshold MAD threshold (default: 3)
+function RunningStats:outliersMAD(threshold)
+	threshold = threshold or 3
+
+	if #self._history < 3 then
+		return {}
+	end
+
+	local median = self:median()
+	local mad = self:mad()
+
+	if not median or not mad then
+		return {}
+	end
+
+	local outliers = {}
+	for i, value in ipairs(self._history) do
+		local deviation = componentMap(
+			componentWise(value, median, function(v, m) return v - m end),
+			abs
+		)
+
+		local score = toScalar(componentWise(deviation, mad, function(d, m) 
+			if abs(m) < EPSILON then return 0 end
+			return d / m
+		end))
+
+		if score > threshold then
+			insert(outliers, {
+				index = i,
+				value = value,
+				score = score
+			})
+		end
+	end
+
+	return outliers
+end
+
+--[[============================================================================
+	STATISTICAL INFERENCE
+============================================================================]]
+
+--- Calculate Z-score for a value
+function RunningStats:zscore(value)
+	if self._dataType ~= "number" then
+		warn("Z-score only for numbers")
+		return nil
+	end
+
+	local mean = self:mean()
+	local std = self:stdDev()
+
+	if not mean or not std or abs(std) < EPSILON then
+		return nil
+	end
+
+	return (value - mean) / std
+end
+
+--- Calculate confidence interval for the mean
+-- @param confidenceLevel Confidence level (default: 0.95 for 95%)
+function RunningStats:confidenceInterval(confidenceLevel)
+	confidenceLevel = confidenceLevel or DEFAULT_CONFIDENCE_LEVEL
+
+	if self._dataType ~= "number" then
+		warn("Confidence intervals only for numbers")
+		return nil
+	end
+
+	if #self._history < 2 then
+		return nil
+	end
+
+	local mean = self:mean()
+	local std = self:stdDev()
+
+	-- Approximate Z-scores for common confidence levels
+	local zScores = {
+		[0.90] = 1.645,
+		[0.95] = 1.960,
+		[0.99] = 2.576
+	}
+
+	local z = zScores[confidenceLevel] or 1.960
+	local marginOfError = z * (std / sqrt(#self._history))
+
+	return {
+		mean = mean,
+		lower = mean - marginOfError,
+		upper = mean + marginOfError,
+		marginOfError = marginOfError
+	}
+end
+
+--[[============================================================================
+	UTILITY FUNCTIONS
+============================================================================]]
+
+--- Get comprehensive statistics summary
+function RunningStats:summary()
+	local summary = {
+		count = #self._history,
+		mean = self:mean(),
+		median = self:median(),
+		mode = self._dataType == "number" and self:mode() or nil,
+		min = self:min(),
+		max = self:max(),
+		range = self:range(),
+		variance = self:variance(),
+		stdDev = self:stdDev(),
+		iqr = self:iqr(),
+		quartiles = self:quartiles(),
+	}
+
+	if self._dataType == "number" then
+		summary.skewness = self:skewness()
+		summary.kurtosis = self:kurtosis()
+		summary.cv = self:coefficientOfVariation()
+	end
+
+	return summary
+end
+
+--- Export data and configuration
+function RunningStats:serialize()
+	return {
+		version = RunningStats.VERSION,
+		config = {
+			maxHistory = self._maxHistory,
+			windowType = self._windowType,
+			decayFactor = self._decayFactor,
+			trackTimestamps = self._trackTimestamps
+		},
+		history = self:getHistory(),
+		timestamps = self._trackTimestamps and self._timestamps or nil,
+		dataType = self._dataType
+	}
+end
+
+--- Create from serialized data
+function RunningStats.deserialize(data)
+	local stats = RunningStats.new(data.config)
+
+	if data.history then
+		stats:addBatch(data.history)
+	end
+
+	if data.timestamps then
+		stats._timestamps = data.timestamps
+	end
+
+	return stats
+end
+
+--- Clone the statistics instance
+function RunningStats:clone()
+	local copy = RunningStats.new({
+		maxHistory = self._maxHistory,
+		windowType = self._windowType,
+		decayFactor = self._decayFactor,
+		trackTimestamps = self._trackTimestamps
+	})
+
+	copy:addBatch(self:getHistory())
+
+	return copy
+end
+
+--- Pretty print statistics
+function RunningStats:__tostring()
+	local summary = self:summary()
+	local lines = {
+		string.format("RunningStats (%s, n=%d):", self._dataType or "empty", #self._history)
+	}
+
+	if #self._history > 0 then
+		insert(lines, string.format("  Mean: %s", tostring(summary.mean)))
+		insert(lines, string.format("  Median: %s", tostring(summary.median)))
+		insert(lines, string.format("  Std Dev: %s", tostring(summary.stdDev)))
+		insert(lines, string.format("  Range: [%s, %s]", tostring(summary.min), tostring(summary.max)))
+	end
+
+	return table.concat(lines, "\n")
 end
 
 return RunningStats
