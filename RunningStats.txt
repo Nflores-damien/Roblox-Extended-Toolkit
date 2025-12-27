@@ -1,6 +1,7 @@
+-- Licensed under MIT License
+-- Copyright (c) 2025 Damien Flores
+
 --[[
-	Professional Running Statistics Library for Roblox
-	Version: 2.0.0
 	
 	A comprehensive real-time statistics library featuring:
 	- Descriptive statistics (mean, median, mode, quartiles, etc.)
@@ -1404,3 +1405,4 @@ function RunningStats:__tostring()
 end
 
 return RunningStats
+
