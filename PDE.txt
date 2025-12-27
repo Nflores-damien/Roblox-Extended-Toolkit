@@ -1,9 +1,4 @@
 --[[
-	Professional Partial Differential Equations (PDE) Solver Suite for Roblox
-	Version: 2.0.0
-	
-	A comprehensive numerical PDE solver featuring:
-	
 	CORE CAPABILITIES:
 	- Multi-dimensional solvers (1D, 2D, 3D grids)
 	- Multiple PDE types (parabolic, hyperbolic, elliptic)
